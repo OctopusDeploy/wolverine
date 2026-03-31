@@ -72,29 +72,37 @@ DECLARE @NOCOUNT VARCHAR(3) = 'OFF';
 IF ( (512 & @@OPTIONS) = 512 ) SET @NOCOUNT = 'ON';
 SET NOCOUNT ON;
 
-delete FROM {queueTableIdentifier} WITH (UPDLOCK, READPAST, ROWLOCK) where id in (select id from {queue.Parent.MessageStorageSchemaName}.{DatabaseConstants.IncomingTable});
-select top(@count) id, body, message_type, keep_until into #temp_pop_{queue.Name}
-FROM {queueTableIdentifier} WITH (UPDLOCK, READPAST, ROWLOCK)
-ORDER BY {queueTableIdentifier}.timestamp;
-delete from {queueTableIdentifier} where id in (select id from #temp_pop_{queue.Name});
-INSERT INTO {queue.Parent.MessageStorageSchemaName}.{DatabaseConstants.IncomingTable}
-(id, status, owner_id, body, message_type, received_at, keep_until)
- SELECT id, 'Incoming', @node, body, message_type, '{Address}', keep_until FROM #temp_pop_{queue.Name};
-select body from #temp_pop_{queue.Name};
+delete FROM {queueTableIdentifier} WHERE id IN (select id from {queue.Parent.MessageStorageSchemaName}.{DatabaseConstants.IncomingTable});
+
+WITH message AS (
+    SELECT TOP(@count) {DatabaseConstants.Id}, {DatabaseConstants.Body}, {DatabaseConstants.MessageType}, {DatabaseConstants.KeepUntil}
+    FROM {queueTableIdentifier} WITH (UPDLOCK, READPAST, ROWLOCK)
+    ORDER BY {queueTableIdentifier}.timestamp)
+DELETE FROM message
+OUTPUT deleted.{DatabaseConstants.Id}, 'Incoming', @node, deleted.{DatabaseConstants.Body}, deleted.{DatabaseConstants.MessageType}, '{Address}', deleted.{DatabaseConstants.KeepUntil}
+    INTO {queue.Parent.MessageStorageSchemaName}.{DatabaseConstants.IncomingTable}
+        ({DatabaseConstants.Id}, status, owner_id, {DatabaseConstants.Body}, {DatabaseConstants.MessageType}, received_at, {DatabaseConstants.KeepUntil})
+OUTPUT deleted.{DatabaseConstants.Body};
 
 IF (@NOCOUNT = 'ON') SET NOCOUNT ON;
 IF (@NOCOUNT = 'OFF') SET NOCOUNT OFF;";
 
         _moveScheduledToReadyQueueSql = $@"
-select id, body, message_type, keep_until into #temp_move_{queue.Name}
-FROM {scheduledTableIdentifier} WITH (UPDLOCK, READPAST, ROWLOCK)
-WHERE {DatabaseConstants.ExecutionTime} <= SYSDATETIMEOFFSET() AND ID NOT IN (select id from {queueTableIdentifier})
-ORDER BY {scheduledTableIdentifier}.timestamp;
-delete from {scheduledTableIdentifier} where id in (select id from #temp_move_{queue.Name});
+DECLARE @moved TABLE ({DatabaseConstants.Id} uniqueidentifier, {DatabaseConstants.Body} varbinary(max), {DatabaseConstants.MessageType} varchar(250), {DatabaseConstants.KeepUntil} datetimeoffset);
+
+WITH message AS (
+    SELECT {DatabaseConstants.Id}, {DatabaseConstants.Body}, {DatabaseConstants.MessageType}, {DatabaseConstants.KeepUntil}
+    FROM {scheduledTableIdentifier} WITH (UPDLOCK, READPAST, ROWLOCK)
+    WHERE {DatabaseConstants.ExecutionTime} <= SYSDATETIMEOFFSET() AND {DatabaseConstants.Id} NOT IN (select {DatabaseConstants.Id} from {queueTableIdentifier}))
+DELETE FROM message
+OUTPUT deleted.{DatabaseConstants.Id}, deleted.{DatabaseConstants.Body}, deleted.{DatabaseConstants.MessageType}, deleted.{DatabaseConstants.KeepUntil}
+INTO @moved;
+
 INSERT INTO {queueTableIdentifier}
-(id, body, message_type, keep_until)
- SELECT id, body, message_type, keep_until FROM #temp_move_{queue.Name};
-select count(*) from #temp_move_{queue.Name}
+({DatabaseConstants.Id}, {DatabaseConstants.Body}, {DatabaseConstants.MessageType}, {DatabaseConstants.KeepUntil})
+SELECT {DatabaseConstants.Id}, {DatabaseConstants.Body}, {DatabaseConstants.MessageType}, {DatabaseConstants.KeepUntil} FROM @moved;
+
+select count(*) from @moved;
 ";
 
         _deleteExpiredSql =
@@ -282,7 +290,7 @@ select count(*) from #temp_move_{queue.Name}
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
 
-        return await conn
+        var fetchListAsync = await conn
             .CreateCommand(_tryPopMessagesToInboxSql)
             .With("count", count)
             .With("node", settings.AssignedNodeNumber)
@@ -301,5 +309,7 @@ select count(*) from #temp_move_{queue.Name}
                     return Envelope.ForPing(Address); // just a stand in
                 }
             }, cancellationToken);
+        
+        return fetchListAsync;
     }
 }

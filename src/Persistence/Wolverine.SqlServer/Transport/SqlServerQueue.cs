@@ -348,15 +348,22 @@ DELETE FROM {Parent.MessageStorageSchemaName}.{DatabaseConstants.OutgoingTable} 
 ";
 
         _moveScheduledToReadyQueueSql = $@"
-select id, body, message_type, keep_until into #temp_move_{Name}
-FROM {ScheduledTable.Identifier} WITH (UPDLOCK, READPAST, ROWLOCK)
-WHERE {DatabaseConstants.ExecutionTime} <= SYSDATETIMEOFFSET() AND ID NOT IN (select id from {QueueTable.Identifier})
-ORDER BY {ScheduledTable.Identifier}.timestamp;
-delete from {ScheduledTable.Identifier} where id in (select id from #temp_move_{Name});
+DECLARE @moved TABLE ({DatabaseConstants.Id} uniqueidentifier, {DatabaseConstants.Body} varbinary(max), {DatabaseConstants.MessageType} varchar(250), {DatabaseConstants.KeepUntil} datetimeoffset);
+
+WITH message AS (
+    SELECT {DatabaseConstants.Id}, {DatabaseConstants.Body}, {DatabaseConstants.MessageType}, {DatabaseConstants.KeepUntil}
+    FROM {ScheduledTable.Identifier} WITH (UPDLOCK, READPAST, ROWLOCK)
+    WHERE {DatabaseConstants.ExecutionTime} <= SYSDATETIMEOFFSET() AND {DatabaseConstants.Id} NOT IN (select {DatabaseConstants.Id} from {QueueTable.Identifier})
+    ORDER BY {ScheduledTable.Identifier}.timestamp)
+DELETE FROM message
+OUTPUT deleted.{DatabaseConstants.Id}, deleted.{DatabaseConstants.Body}, deleted.{DatabaseConstants.MessageType}, deleted.{DatabaseConstants.KeepUntil}
+INTO @moved;
+
 INSERT INTO {QueueTable.Identifier}
-(id, body, message_type, keep_until)
- SELECT id, body, message_type, keep_until FROM #temp_move_{Name};
-select count(*) from #temp_move_{Name}
+({DatabaseConstants.Id}, {DatabaseConstants.Body}, {DatabaseConstants.MessageType}, {DatabaseConstants.KeepUntil})
+SELECT {DatabaseConstants.Id}, {DatabaseConstants.Body}, {DatabaseConstants.MessageType}, {DatabaseConstants.KeepUntil} FROM @moved;
+
+select count(*) from @moved;
 ";
 
         _deleteExpiredSql =
@@ -383,15 +390,17 @@ DECLARE @NOCOUNT VARCHAR(3) = 'OFF';
 IF ( (512 & @@OPTIONS) = 512 ) SET @NOCOUNT = 'ON';
 SET NOCOUNT ON;
 
-delete FROM {QueueTable.Identifier} WITH (UPDLOCK, READPAST, ROWLOCK) where id in (select id from {Parent.MessageStorageSchemaName}.{DatabaseConstants.IncomingTable});
-select top(@count) id, body, message_type, keep_until into #temp_pop_{Name}
-FROM {QueueTable.Identifier} WITH (UPDLOCK, READPAST, ROWLOCK)
-ORDER BY {QueueTable.Identifier}.timestamp;
-delete from {QueueTable.Identifier} where id in (select id from #temp_pop_{Name});
-INSERT INTO {Parent.MessageStorageSchemaName}.{DatabaseConstants.IncomingTable}
-(id, status, owner_id, body, message_type, received_at, keep_until)
- SELECT id, 'Incoming', @node, body, message_type, '{Uri}', keep_until FROM #temp_pop_{Name};
-select body from #temp_pop_{Name};
+delete FROM {QueueTable.Identifier} WHERE id IN (select id from {Parent.MessageStorageSchemaName}.{DatabaseConstants.IncomingTable});
+
+WITH message AS (
+    SELECT TOP(@count) {DatabaseConstants.Id}, {DatabaseConstants.Body}, {DatabaseConstants.MessageType}, {DatabaseConstants.KeepUntil}
+    FROM {QueueTable.Identifier} WITH (UPDLOCK, READPAST, ROWLOCK)
+    ORDER BY {QueueTable.Identifier}.timestamp)
+DELETE FROM message
+OUTPUT deleted.{DatabaseConstants.Id}, 'Incoming', @node, deleted.{DatabaseConstants.Body}, deleted.{DatabaseConstants.MessageType}, '{Uri}', deleted.{DatabaseConstants.KeepUntil}
+    INTO {Parent.MessageStorageSchemaName}.{DatabaseConstants.IncomingTable}
+        ({DatabaseConstants.Id}, status, owner_id, {DatabaseConstants.Body}, {DatabaseConstants.MessageType}, received_at, {DatabaseConstants.KeepUntil})
+OUTPUT deleted.{DatabaseConstants.Body};
 
 IF (@NOCOUNT = 'ON') SET NOCOUNT ON;
 IF (@NOCOUNT = 'OFF') SET NOCOUNT OFF;";
