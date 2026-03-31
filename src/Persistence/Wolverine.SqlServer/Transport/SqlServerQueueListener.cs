@@ -72,7 +72,7 @@ DECLARE @NOCOUNT VARCHAR(3) = 'OFF';
 IF ( (512 & @@OPTIONS) = 512 ) SET @NOCOUNT = 'ON';
 SET NOCOUNT ON;
 
-delete FROM {queueTableIdentifier} WHERE id IN (select id from {queue.Parent.MessageStorageSchemaName}.{DatabaseConstants.IncomingTable});
+delete FROM {queueTableIdentifier} WITH (READPAST, ROWLOCK) WHERE id IN (select id from {queue.Parent.MessageStorageSchemaName}.{DatabaseConstants.IncomingTable} WITH (NOLOCK));
 
 WITH message AS (
     SELECT TOP(@count) {DatabaseConstants.Id}, {DatabaseConstants.Body}, {DatabaseConstants.MessageType}, {DatabaseConstants.KeepUntil}
