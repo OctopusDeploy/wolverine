@@ -51,6 +51,10 @@ internal class SqlServerQueueListener : IListener
         var queueTableIdentifier = queue.QueueTable.Identifier;
         var scheduledTableIdentifier = queue.ScheduledTable.Identifier;
 
+        // When the high-throughput layout is enabled the tables are clustered on the monotonic
+        // "seq" identity, so dequeue ordering must use it; otherwise fall back to "timestamp".
+        var orderBy = queue.Parent.OptimizeQueueThroughput ? "seq" : "timestamp";
+
         _tryPopMessagesDirectlySql = $@"
 DECLARE @NOCOUNT VARCHAR(3) = 'OFF';
 IF ( (512 & @@OPTIONS) = 512 ) SET @NOCOUNT = 'ON';
@@ -59,7 +63,7 @@ SET NOCOUNT ON;
 WITH message AS (
     SELECT TOP(@count) {DatabaseConstants.Body}, {DatabaseConstants.KeepUntil}
     FROM {queueTableIdentifier} WITH (UPDLOCK, READPAST, ROWLOCK)
-    ORDER BY {queueTableIdentifier}.timestamp)
+    ORDER BY {queueTableIdentifier}.{orderBy})
 DELETE FROM message
 OUTPUT
     deleted.{DatabaseConstants.Body};
@@ -77,7 +81,7 @@ delete FROM {queueTableIdentifier} WITH (READPAST, ROWLOCK) WHERE id IN (select 
 WITH message AS (
     SELECT TOP(@count) {DatabaseConstants.Id}, {DatabaseConstants.Body}, {DatabaseConstants.MessageType}, {DatabaseConstants.KeepUntil}
     FROM {queueTableIdentifier} WITH (UPDLOCK, READPAST, ROWLOCK)
-    ORDER BY {queueTableIdentifier}.timestamp)
+    ORDER BY {queueTableIdentifier}.{orderBy})
 DELETE FROM message
 OUTPUT deleted.{DatabaseConstants.Id}, 'Incoming', @node, deleted.{DatabaseConstants.Body}, deleted.{DatabaseConstants.MessageType}, '{Address}', deleted.{DatabaseConstants.KeepUntil}
     INTO {queue.Parent.MessageStorageSchemaName}.{DatabaseConstants.IncomingTable}
